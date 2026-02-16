@@ -8,6 +8,12 @@ import { z } from "zod";
 import { HealthService } from "./tools/health.js";
 import { CostService } from "./tools/cost.js";
 import { DeploymentService } from "./tools/deploy.js";
+import { LoggingService } from "./tools/logging.js";
+import { ResourceService } from "./tools/resources.js";
+import { SecurityService } from "./tools/security.js";
+import { OptimizationService } from "./tools/recommender.js";
+import { QuotaService } from "./tools/quotas.js";
+import { ArchitectureService } from "./tools/architecture.js";
 import { IAMService } from "./utils/iam-checker.js";
 import { GCP_CONFIG } from "./utils/gcp-config.js";
 
@@ -15,6 +21,12 @@ import { GCP_CONFIG } from "./utils/gcp-config.js";
 const healthService = new HealthService();
 const costService = new CostService();
 const deploymentService = new DeploymentService();
+const loggingService = new LoggingService();
+const resourceService = new ResourceService();
+const securityService = new SecurityService();
+const optimizationService = new OptimizationService();
+const quotaService = new QuotaService();
+const architectureService = new ArchitectureService();
 const iamService = new IAMService();
 
 // Session State
@@ -56,6 +68,40 @@ const GetCiPipelineStatusSchema = z.object({
 });
 
 const TestIamIdentitySchema = z.object({
+    project: z.string().optional().describe("Optional project ID override"),
+});
+
+const ExploreLogsSchema = z.object({
+    query: z.string().optional().describe("Search keyword or error pattern"),
+    limit: z.number().optional().default(50).describe("Number of logs to fetch"),
+    severity: z.string().optional().describe("Minimum severity level (DEFAULT, DEBUG, INFO, NOTICE, WARNING, ERROR, CRITICAL, ALERT, EMERGENCY)"),
+    resourceType: z.string().optional().describe("GCP resource type (e.g., cloud_run_revision, gce_instance)"),
+    project: z.string().optional().describe("Optional project ID override"),
+});
+
+const ManageResourceSchema = z.object({
+    resourceType: z.enum(["gce", "run"]).describe("Type of resource to manage"),
+    resourceName: z.string().describe("Name of the resource (instance name or service name)"),
+    action: z.enum(["start", "stop", "restart"]).describe("Action to perform"),
+    location: z.string().describe("Zone for GCE or Region for Cloud Run (e.g., us-central1-a, us-central1)"),
+    project: z.string().optional().describe("Optional project ID override"),
+});
+
+const AuditSecurityFindingsSchema = z.object({
+    severity: z.string().optional().default("HIGH").describe("Minimum severity level (CRITICAL, HIGH, MEDIUM, LOW)"),
+    project: z.string().optional().describe("Optional project ID override"),
+});
+
+const GetOptimizationRecommendationsSchema = z.object({
+    location: z.string().optional().default("global").describe("GCP location for recommendations (e.g., us-central1, global)"),
+    project: z.string().optional().describe("Optional project ID override"),
+});
+
+const CheckQuotaStatusSchema = z.object({
+    project: z.string().optional().describe("Optional project ID override"),
+});
+
+const GenerateArchitectureDiagramSchema = z.object({
     project: z.string().optional().describe("Optional project ID override"),
 });
 
@@ -155,6 +201,77 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                     required: ["repo"],
                 },
             },
+            {
+                name: "explore_logs",
+                description: "Search and troubleshoot service logs. Use this to find root causes of errors.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        query: { type: "string" },
+                        limit: { type: "number" },
+                        severity: { type: "string" },
+                        resourceType: { type: "string" },
+                        project: { type: "string" },
+                    },
+                },
+            },
+            {
+                name: "manage_resource",
+                description: "Start, stop, or restart GCP resources (GCE instances or Cloud Run services).",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        resourceType: { type: "string", enum: ["gce", "run"] },
+                        resourceName: { type: "string" },
+                        action: { type: "string", enum: ["start", "stop", "restart"] },
+                        location: { type: "string" },
+                        project: { type: "string" },
+                    },
+                    required: ["resourceType", "resourceName", "action", "location"],
+                },
+            },
+            {
+                name: "audit_security_findings",
+                description: "List active security findings from Cloud Security Command Center.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        severity: { type: "string", enum: ["CRITICAL", "HIGH", "MEDIUM", "LOW"] },
+                        project: { type: "string" },
+                    },
+                },
+            },
+            {
+                name: "get_optimization_recommendations",
+                description: "Get AI-powered cost and resource optimization recommendations from GCP.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        location: { type: "string" },
+                        project: { type: "string" },
+                    },
+                },
+            },
+            {
+                name: "check_quota_status",
+                description: "Monitor GCP service quotas and identify those approaching limits.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        project: { type: "string" },
+                    },
+                },
+            },
+            {
+                name: "generate_architecture_diagram",
+                description: "Generate a Mermaid.js architecture diagram of the GCP project resources.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        project: { type: "string" },
+                    },
+                },
+            },
         ],
     };
 });
@@ -243,6 +360,89 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 const targetProject = ensureProject(project);
                 const status = await deploymentService.getCiPipelineStatus(repo, targetProject);
                 return { content: [{ type: "text", text: JSON.stringify(status, null, 2) }] };
+            }
+
+            case "explore_logs": {
+                const { query, limit, severity, resourceType, project } = ExploreLogsSchema.parse(args);
+                const targetProject = ensureProject(project);
+                const logs = await loggingService.fetchLogs(targetProject, { query, limit, severity, resourceType });
+                return {
+                    content: [{
+                        type: "text",
+                        text: JSON.stringify({ project: targetProject, count: logs.length, logs }, null, 2)
+                    }],
+                };
+            }
+
+            case "manage_resource": {
+                const { resourceType, resourceName, action, location, project } = ManageResourceSchema.parse(args);
+                const targetProject = ensureProject(project);
+
+                let result;
+                if (resourceType === "gce") {
+                    if (action === "restart") {
+                        throw new Error("Restart not directly supported for GCE via this tool. Use stop then start.");
+                    }
+                    result = await resourceService.manageGceInstance(targetProject, location, resourceName, action as "start" | "stop");
+                } else {
+                    if (action !== "restart") {
+                        throw new Error("Only 'restart' action is supported for Cloud Run services via this tool.");
+                    }
+                    result = await resourceService.restartCloudRunService(targetProject, location, resourceName);
+                }
+
+                return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+            }
+
+            case "audit_security_findings": {
+                const { severity, project } = AuditSecurityFindingsSchema.parse(args);
+                const targetProject = ensureProject(project);
+                const findings = await securityService.getSecurityFindings(targetProject, severity);
+                return {
+                    content: [{
+                        type: "text",
+                        text: JSON.stringify({ project: targetProject, count: findings.length, findings }, null, 2)
+                    }],
+                };
+            }
+
+            case "get_optimization_recommendations": {
+                const { location, project } = GetOptimizationRecommendationsSchema.parse(args);
+                const targetProject = ensureProject(project);
+                const recommendations = await optimizationService.getRecommendations(targetProject, location);
+                return {
+                    content: [{
+                        type: "text",
+                        text: JSON.stringify({ project: targetProject, count: recommendations.length, recommendations }, null, 2)
+                    }],
+                };
+            }
+
+            case "check_quota_status": {
+                const { project } = CheckQuotaStatusSchema.parse(args);
+                const targetProject = ensureProject(project);
+                const quotas = await quotaService.getQuotaStatus(targetProject);
+                return {
+                    content: [{
+                        type: "text",
+                        text: JSON.stringify({ project: targetProject, quotas }, null, 2)
+                    }],
+                };
+            }
+
+            case "generate_architecture_diagram": {
+                const { project } = GenerateArchitectureDiagramSchema.parse(args);
+                const targetProject = ensureProject(project);
+                const result = await architectureService.generateDiagram(targetProject);
+                if (typeof result === "string") {
+                    return { content: [{ type: "text", text: result }] };
+                }
+                return {
+                    content: [{
+                        type: "text",
+                        text: `Architecture Diagram for ${targetProject}:\n\n\`\`\`mermaid\n${result.diagram}\n\`\`\`\n\n${result.explanation}`
+                    }],
+                };
             }
 
             default:
