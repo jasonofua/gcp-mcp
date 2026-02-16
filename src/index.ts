@@ -42,10 +42,12 @@ const GetCloudCostBreakdownSchema = z.object({
 const TriggerDeploymentSchema = z.object({
     service: z.string().describe("The name of the service to deploy"),
     approval: z.boolean().describe("Explicit approval flag for production deployments"),
+    project: z.string().optional().describe("Optional GCP project ID"),
 });
 
 const GetCiPipelineStatusSchema = z.object({
     repo: z.string().describe("The repository name to check CI status for"),
+    project: z.string().optional().describe("Optional GCP project ID"),
 });
 
 /**
@@ -85,6 +87,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                     properties: {
                         service: { type: "string" },
                         approval: { type: "boolean" },
+                        project: { type: "string" },
                     },
                     required: ["service", "approval"],
                 },
@@ -96,6 +99,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                     type: "object",
                     properties: {
                         repo: { type: "string" },
+                        project: { type: "string" },
                     },
                     required: ["repo"],
                 },
@@ -153,22 +157,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
 
             case "trigger_deployment": {
-                const { service, approval } = TriggerDeploymentSchema.parse(args);
+                const { service, approval, project } = TriggerDeploymentSchema.parse(args);
                 if (!approval) {
                     return {
                         content: [{ type: "text", text: "Error: Deployment requires explicit 'approval: true' for safety." }],
                         isError: true,
                     };
                 }
-                const result = await deploymentService.triggerDeployment(service, approval);
+                const result = await deploymentService.triggerDeployment(service, approval, project);
                 return {
                     content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
                 };
             }
 
             case "get_ci_pipeline_status": {
-                const { repo } = GetCiPipelineStatusSchema.parse(args);
-                const status = await deploymentService.getCiPipelineStatus(repo);
+                const { repo, project } = GetCiPipelineStatusSchema.parse(args);
+                const status = await deploymentService.getCiPipelineStatus(repo, project);
                 return {
                     content: [{ type: "text", text: JSON.stringify(status, null, 2) }],
                 };
