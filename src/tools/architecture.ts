@@ -29,18 +29,23 @@ export class ArchitectureService {
             }
 
             // 2. Discover GCE Instances
-            // aggregatedList returns an iterable of [zone, instancesObject]
-            const [instancesMap]: any = await this.computeClient.aggregatedList({
-                project: projectId,
-            });
-
-            for (const zone in instancesMap) {
-                const zoneInstances = instancesMap[zone].instances || [];
-                for (const instance of zoneInstances) {
-                    const id = instance.name || "unknown";
-                    resources.push({ id, type: "GCE", label: id });
-                    diagramLines.push(`  ${id}["GCE: ${id}"]`);
+            // aggregatedListAsync returns an async iterable of [zone, instancesObject]
+            const gceInstances: { id: string; type: string; label: string }[] = [];
+            try {
+                for await (const [zone, instancesInZone] of this.computeClient.aggregatedListAsync({
+                    project: projectId,
+                })) {
+                    const zoneInstances = instancesInZone.instances || [];
+                    for (const instance of zoneInstances) {
+                        const id = instance.name || "unknown";
+                        gceInstances.push({ id, type: "GCE", label: id });
+                        diagramLines.push(`  ${id}["GCE: ${id}"]`);
+                    }
                 }
+                resources.push(...gceInstances);
+            } catch (error: any) {
+                console.error(`Error fetching GCE instances:`, error.message);
+                // Continue with other resources
             }
 
             // 3. Simple relationship inference (Experimental)
