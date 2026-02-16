@@ -17,12 +17,12 @@ export class IAMService {
     private auth: GoogleAuth;
     private projectsClient: ProjectsClient;
 
-    // Define the core permissions needed for each tool
+    // Real permission strings for Project resource
     private readonly REQUIRED_PERMISSIONS = {
         health: ["monitoring.timeSeries.list"],
-        cost: ["bigquery.jobs.create", "bigquery.tables.getData"],
-        deployment: ["cloudbuild.builds.create"],
-        billing: ["cloudbilling.projects.getBillingInfo"],
+        cost: ["bigquery.jobs.create", "bigquery.tables.list"],
+        deployment: ["cloudbuild.builds.list"],
+        billing: ["resourcemanager.projects.get"], // Basic check if project is accessible
     };
 
     constructor() {
@@ -36,9 +36,16 @@ export class IAMService {
         const client = await this.auth.getClient();
         const project = await this.auth.getProjectId();
 
-        let email = "Unknown Principal";
-        if ("email" in client) email = (client as any).email;
-        else if ("getServiceAccountEmail" in client) email = await (client as any).getServiceAccountEmail();
+        let email = "User Identity (Authenticated)";
+
+        // Service Accounts have email, User Credentials often don't in the base client
+        if ("email" in client) {
+            email = (client as any).email;
+        } else if ("getServiceAccountEmail" in client) {
+            email = await (client as any).getServiceAccountEmail();
+        } else if ((client as any)._clientId) {
+            email = `User Credential (${project})`;
+        }
 
         return {
             email,

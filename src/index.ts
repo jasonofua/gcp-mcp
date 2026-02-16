@@ -37,31 +37,44 @@ const server = new Server(
  */
 const GetServiceHealthSchema = z.object({
     service: z.string().describe("The name of the GCP service"),
-    project: z.string().optional().describe("Optional project ID, defaults to active project"),
+    project: z.string().optional().describe("Optional project ID override"),
 });
 
 const GetCloudCostBreakdownSchema = z.object({
-    project: z.string().optional().describe("Optional project ID, defaults to active project"),
+    project: z.string().optional().describe("Optional project ID override"),
 });
 
 const TriggerDeploymentSchema = z.object({
     service: z.string().describe("The name of the service to deploy"),
     approval: z.boolean().describe("Explicit approval flag"),
-    project: z.string().optional().describe("Optional project ID, defaults to active project"),
+    project: z.string().optional().describe("Optional project ID override"),
 });
 
 const GetCiPipelineStatusSchema = z.object({
     repo: z.string().describe("Repository name"),
-    project: z.string().optional().describe("Optional project ID, defaults to active project"),
+    project: z.string().optional().describe("Optional project ID override"),
 });
 
 const TestIamIdentitySchema = z.object({
-    project: z.string().optional().describe("Optional project ID, defaults to active project"),
+    project: z.string().optional().describe("Optional project ID override"),
 });
 
 const SetActiveProjectSchema = z.object({
     projectId: z.string().describe("The GCP project ID to set as active"),
 });
+
+/**
+ * Helper to ensure a project is selected before running functional tools.
+ */
+function ensureProject(projectArg?: string): string {
+    const target = projectArg || activeProjectId;
+    if (!target) {
+        throw new Error(
+            "No project selected. Please run 'list_projects' and then 'set_active_project' to choose a project to work with."
+        );
+    }
+    return target;
+}
 
 /**
  * Register Tool Listing
@@ -71,18 +84,28 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         tools: [
             {
                 name: "list_projects",
-                description: "List all GCP projects the authenticated user can access.",
+                description: "Step 1: List all GCP projects you have access to. Use this if you haven't selected a project yet.",
                 inputSchema: { type: "object", properties: {} },
             },
             {
                 name: "set_active_project",
-                description: "Set the default project for all subsequent GCP tool calls.",
+                description: "Step 2: Set the active project for this session. This is required before using other tools.",
                 inputSchema: {
                     type: "object",
                     properties: {
                         projectId: { type: "string" },
                     },
                     required: ["projectId"],
+                },
+            },
+            {
+                name: "test_iam_identity",
+                description: "Check your current authentication status and verify if you have the required permissions in a project.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        project: { type: "string" },
+                    },
                 },
             },
             {
@@ -132,16 +155,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                     required: ["repo"],
                 },
             },
-            {
-                name: "test_iam_identity",
-                description: "Perform granular verification of GCP IAM permissions and identity.",
-                inputSchema: {
-                    type: "object",
-                    properties: {
-                        project: { type: "string" },
-                    },
-                },
-            },
         ],
     };
 });
@@ -153,31 +166,42 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
     try {
+        // Special case: check auth/projects even without a selected project
+        if (name === "list_projects") {
+            const projects = await iamService.listProjects();
+            return {
+                content: [{
+                    type: "text",
+                    text: JSON.stringify({ activeProjectId: activeProjectId || "NONE", projects }, null, 2)
+                }],
+            };
+        }
+
+        if (name === "set_active_project") {
+            const { projectId } = SetActiveProjectSchema.parse(args);
+            // Verify project exists/accessible before setting
+            await iamService.verifyPermissions(projectId);
+            activeProjectId = projectId;
+            return {
+                content: [{
+                    type: "text",
+                    text: `Project context successfully set to: ${activeProjectId}`
+                }],
+            };
+        }
+
+        if (name === "test_iam_identity") {
+            const { project } = TestIamIdentitySchema.parse(args);
+            const targetProject = project || activeProjectId;
+            const result = await iamService.verifyPermissions(targetProject || "");
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        }
+
+        // Functional tools require a project set
         switch (name) {
-            case "list_projects": {
-                const projects = await iamService.listProjects();
-                return {
-                    content: [{
-                        type: "text",
-                        text: JSON.stringify({ activeProjectId, projects }, null, 2)
-                    }],
-                };
-            }
-
-            case "set_active_project": {
-                const { projectId } = SetActiveProjectSchema.parse(args);
-                activeProjectId = projectId;
-                return {
-                    content: [{
-                        type: "text",
-                        text: `Active project context set to: ${activeProjectId}`
-                    }],
-                };
-            }
-
             case "get_service_health": {
                 const { service, project } = GetServiceHealthSchema.parse(args);
-                const targetProject = project || activeProjectId;
+                const targetProject = ensureProject(project);
                 const metrics = await healthService.fetchMetrics(service, targetProject);
                 const score = healthService.computeHealthScore(metrics);
                 return {
@@ -190,7 +214,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
             case "get_cloud_cost_breakdown": {
                 const parsed = GetCloudCostBreakdownSchema.parse(args);
-                const targetProject = parsed.project || activeProjectId;
+                const targetProject = ensureProject(parsed.project);
                 const billingStatus = await costService.getBillingAccountStatus(targetProject);
                 const costData = await costService.fetchCostData(targetProject);
 
@@ -209,37 +233,53 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
             case "trigger_deployment": {
                 const { service, approval, project } = TriggerDeploymentSchema.parse(args);
-                const targetProject = project || activeProjectId;
+                const targetProject = ensureProject(project);
                 const result = await deploymentService.triggerDeployment(service, approval, targetProject);
                 return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
             }
 
             case "get_ci_pipeline_status": {
                 const { repo, project } = GetCiPipelineStatusSchema.parse(args);
-                const targetProject = project || activeProjectId;
+                const targetProject = ensureProject(project);
                 const status = await deploymentService.getCiPipelineStatus(repo, targetProject);
                 return { content: [{ type: "text", text: JSON.stringify(status, null, 2) }] };
-            }
-
-            case "test_iam_identity": {
-                const { project } = TestIamIdentitySchema.parse(args);
-                const targetProject = project || activeProjectId;
-                const result = await iamService.verifyPermissions(targetProject);
-                return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
             }
 
             default:
                 throw new Error(`Unknown tool: ${name}`);
         }
     } catch (error: any) {
+        // If it's a "No credentials" error from Google Auth, provide clear login instructions
+        if (error.message.includes("Could not load the default credentials")) {
+            return {
+                content: [{
+                    type: "text",
+                    text: "Error: GCP Authentication failed. Please run 'gcloud auth application-default login' on your machine to authenticate the MCP server."
+                }],
+                isError: true,
+            };
+        }
         return { content: [{ type: "text", text: `Error: ${error.message}` }], isError: true };
     }
 });
 
 async function main() {
     const transport = new StdioServerTransport();
+
+    // Validate identity at startup
+    try {
+        const identity = await iamService.getIdentity();
+        console.error(`GCP Control Plane MCP Server running as: ${identity.email}`);
+        if (!activeProjectId) {
+            console.error("No default project detected. Onboarding required via 'list_projects'.");
+        } else {
+            console.error(`Default project from environment: ${activeProjectId}`);
+        }
+    } catch (err) {
+        console.error("WARNING: Startup authentication check failed. User must run 'gcloud auth application-default login'.");
+    }
+
     await server.connect(transport);
-    console.error(`GCP Control Plane MCP Server running. Default Project: ${activeProjectId}`);
 }
 
 main().catch((error) => {
