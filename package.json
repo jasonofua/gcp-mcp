@@ -11,9 +11,11 @@
   "description": "",
   "dependencies": {
     "@google-cloud/bigquery": "^8.1.1",
+    "@google-cloud/billing": "^5.1.1",
     "@google-cloud/cloudbuild": "^5.5.0",
     "@google-cloud/container": "^6.7.0",
     "@google-cloud/monitoring": "^5.3.1",
+    "@google-cloud/resource-manager": "^6.2.1",
     "@modelcontextprotocol/sdk": "^1.26.0",
     "fastify": "^5.7.4",
     "zod": "^4.3.6"
